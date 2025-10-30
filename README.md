@@ -35,12 +35,13 @@
 streamlit run streamlit_app.py
 ```
 
-啟動後於瀏覽器開啟 `http://localhost:8501`。介面提供：
+啟動後於瀏覽器開啟 `http://localhost:8501`。在側邊欄輸入 OpenAI API Key（僅保存在本次瀏覽 Session），即可開始上傳錄音。介面提供：
 - 音檔上傳（mp3/wav/m4a/flac/ogg...）
 - 轉錄與分析模型選擇
 - 目標翻譯語言（預設繁體中文）
 - 摘要、待辦、關鍵字與對話視圖
-- 原始逐字稿檢視與 JSON 下載
+- 原始逐字稿檢視、可複製的文字框
+- JSON 與 Word (`.docx`) 下載匯出
 
 ## 部署建議
 
