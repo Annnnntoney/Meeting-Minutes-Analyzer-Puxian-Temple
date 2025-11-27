@@ -568,7 +568,14 @@ def main() -> None:
 
     if st.button("開始分析", type="primary"):
         with st.spinner("轉錄與分析中，請稍候..."):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp:
+            # 安全地處理檔案副檔名，避免編碼問題
+            try:
+                file_suffix = Path(uploaded_file.name).suffix
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                # 如果檔案名稱有編碼問題，使用預設副檔名
+                file_suffix = ".mp3"
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
                 tmp.write(uploaded_file.read())
                 temp_path = Path(tmp.name)
 
