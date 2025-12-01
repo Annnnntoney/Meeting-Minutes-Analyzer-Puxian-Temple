@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from docx import Document
 from openai import OpenAI
+from pydub import AudioSegment
 
 
 @dataclass
@@ -126,13 +127,138 @@ def _load_openai_client(explicit_key: Optional[str] = None) -> OpenAI:
         st.stop()
 
 
+def _get_audio_duration(file_path: Path) -> float:
+    """
+    取得音訊檔案的長度（秒）
+    
+    Args:
+        file_path: 音訊檔案路徑
+        
+    Returns:
+        float: 音訊長度（秒）
+    """
+    try:
+        audio = AudioSegment.from_file(str(file_path))
+        return len(audio) / 1000.0  # 轉換為秒
+    except Exception as e:
+        st.warning(f"無法讀取音訊長度：{e}")
+        return 0.0
+
+
+def _split_audio(file_path: Path, max_duration_seconds: float = 1200) -> List[Path]:
+    """
+    將音訊檔案分割成多個片段
+    
+    Args:
+        file_path: 原始音訊檔案路徑
+        max_duration_seconds: 每個片段的最大長度（秒），預設 1200 秒（20 分鐘）
+        
+    Returns:
+        List[Path]: 分割後的音訊檔案路徑列表
+    """
+    try:
+        audio = AudioSegment.from_file(str(file_path))
+        total_duration_ms = len(audio)
+        max_duration_ms = int(max_duration_seconds * 1000)
+        
+        # 如果音訊長度小於限制，直接返回原檔案
+        if total_duration_ms <= max_duration_ms:
+            return [file_path]
+        
+        # 分割音訊
+        chunks: List[Path] = []
+        file_suffix = file_path.suffix
+        
+        for i, start_ms in enumerate(range(0, total_duration_ms, max_duration_ms)):
+            end_ms = min(start_ms + max_duration_ms, total_duration_ms)
+            chunk = audio[start_ms:end_ms]
+            
+            # 建立臨時檔案
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
+                chunk_path = Path(tmp.name)
+                chunk.export(str(chunk_path), format=file_suffix[1:])  # 移除開頭的 '.'
+                chunks.append(chunk_path)
+        
+        return chunks
+    except Exception as e:
+        st.error(f"分割音訊時發生錯誤：{e}")
+        return [file_path]
+
+
 def _transcribe_audio(client: OpenAI, file_path: Path, model: str, language_hint: Optional[str]) -> Dict[str, Any]:
+    """
+    轉錄音訊檔案，自動處理超長音訊
+    
+    Args:
+        client: OpenAI 客戶端
+        file_path: 音訊檔案路徑
+        model: 轉錄模型
+        language_hint: 語言提示
+        
+    Returns:
+        Dict[str, Any]: 轉錄結果
+    """
     if model == "whisper-1":
         response_format = "verbose_json"
     else:
         response_format = "json"
 
     kwargs: Dict[str, Any] = {"language": language_hint} if language_hint else {}
+    
+    # 檢查音訊長度
+    duration = _get_audio_duration(file_path)
+    max_duration = 1400  # OpenAI 限制
+    
+    # 如果音訊超過限制，進行分割
+    if duration > max_duration:
+        st.info(f"音訊長度 {duration:.1f} 秒超過 OpenAI 限制（{max_duration} 秒），正在自動分割...")
+        
+        # 分割成 20 分鐘的片段（留一些緩衝）
+        chunks = _split_audio(file_path, max_duration_seconds=1200)
+        
+        if len(chunks) > 1:
+            st.info(f"已分割為 {len(chunks)} 個片段，正在逐一轉錄...")
+            
+            # 轉錄每個片段
+            all_texts: List[str] = []
+            combined_result: Dict[str, Any] = {}
+            
+            try:
+                for i, chunk_path in enumerate(chunks, 1):
+                    st.info(f"正在轉錄第 {i}/{len(chunks)} 個片段...")
+                    
+                    with chunk_path.open("rb") as audio_file:
+                        result = client.audio.transcriptions.create(
+                            model=model,
+                            file=audio_file,
+                            response_format=response_format,
+                            **kwargs,
+                        )
+                    
+                    if hasattr(result, "model_dump"):
+                        chunk_result = result.model_dump()
+                    else:
+                        chunk_result = dict(result)
+                    
+                    all_texts.append(chunk_result.get("text", ""))
+                    
+                    # 保存第一個片段的完整結果作為基礎
+                    if i == 1:
+                        combined_result = chunk_result
+                
+                # 合併所有文字
+                combined_result["text"] = " ".join(all_texts)
+                st.success(f"已完成 {len(chunks)} 個片段的轉錄並合併結果")
+                
+                return combined_result
+                
+            finally:
+                # 清理臨時檔案
+                for chunk_path in chunks:
+                    if chunk_path != file_path:  # 不要刪除原始檔案
+                        chunk_path.unlink(missing_ok=True)
+    
+    # 正常處理（音訊長度在限制內）
     with file_path.open("rb") as audio_file:
         result = client.audio.transcriptions.create(
             model=model,
