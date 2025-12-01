@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from docx import Document
 from openai import OpenAI
-from pydub import AudioSegment
+import subprocess
+import shutil
 
 
 @dataclass
@@ -129,17 +130,36 @@ def _load_openai_client(explicit_key: Optional[str] = None) -> OpenAI:
 
 def _get_audio_duration(file_path: Path) -> float:
     """
-    取得音訊檔案的長度（秒）
+    使用 ffprobe 取得音訊檔案的長度（秒）
     
     Args:
         file_path: 音訊檔案路徑
         
     Returns:
-        float: 音訊長度（秒）
+        float: 音訊長度（秒），如果無法取得則返回 0.0
     """
+    # 檢查是否有 ffprobe
+    if not shutil.which("ffprobe"):
+        st.warning("系統未安裝 ffprobe，無法檢查音訊長度。將嘗試直接轉錄。")
+        return 0.0
+    
     try:
-        audio = AudioSegment.from_file(str(file_path))
-        return len(audio) / 1000.0  # 轉換為秒
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(file_path)
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+        return 0.0
     except Exception as e:
         st.warning(f"無法讀取音訊長度：{e}")
         return 0.0
@@ -147,7 +167,7 @@ def _get_audio_duration(file_path: Path) -> float:
 
 def _split_audio(file_path: Path, max_duration_seconds: float = 1200) -> List[Path]:
     """
-    將音訊檔案分割成多個片段
+    使用 ffmpeg 將音訊檔案分割成多個片段
     
     Args:
         file_path: 原始音訊檔案路徑
@@ -156,30 +176,57 @@ def _split_audio(file_path: Path, max_duration_seconds: float = 1200) -> List[Pa
     Returns:
         List[Path]: 分割後的音訊檔案路徑列表
     """
+    # 檢查是否有 ffmpeg
+    if not shutil.which("ffmpeg"):
+        st.warning("系統未安裝 ffmpeg，無法分割音訊。將嘗試直接轉錄。")
+        return [file_path]
+    
     try:
-        audio = AudioSegment.from_file(str(file_path))
-        total_duration_ms = len(audio)
-        max_duration_ms = int(max_duration_seconds * 1000)
+        # 先取得總長度
+        duration = _get_audio_duration(file_path)
         
-        # 如果音訊長度小於限制，直接返回原檔案
-        if total_duration_ms <= max_duration_ms:
+        # 如果無法取得長度或長度在限制內，直接返回原檔案
+        if duration == 0.0 or duration <= max_duration_seconds:
             return [file_path]
         
-        # 分割音訊
+        # 計算需要分割成幾個片段
+        num_chunks = int(duration / max_duration_seconds) + 1
         chunks: List[Path] = []
         file_suffix = file_path.suffix
         
-        for i, start_ms in enumerate(range(0, total_duration_ms, max_duration_ms)):
-            end_ms = min(start_ms + max_duration_ms, total_duration_ms)
-            chunk = audio[start_ms:end_ms]
+        for i in range(num_chunks):
+            start_time = i * max_duration_seconds
             
             # 建立臨時檔案
             with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp:
                 chunk_path = Path(tmp.name)
-                chunk.export(str(chunk_path), format=file_suffix[1:])  # 移除開頭的 '.'
+            
+            # 使用 ffmpeg 分割
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i", str(file_path),
+                    "-ss", str(start_time),
+                    "-t", str(max_duration_seconds),
+                    "-c", "copy",  # 不重新編碼，速度更快
+                    "-y",  # 覆蓋輸出檔案
+                    str(chunk_path)
+                ],
+                capture_output=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
                 chunks.append(chunk_path)
+            else:
+                st.warning(f"分割第 {i+1} 個片段時發生錯誤，將使用原始檔案")
+                # 清理已建立的片段
+                for chunk in chunks:
+                    chunk.unlink(missing_ok=True)
+                return [file_path]
         
-        return chunks
+        return chunks if chunks else [file_path]
+        
     except Exception as e:
         st.error(f"分割音訊時發生錯誤：{e}")
         return [file_path]
